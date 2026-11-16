@@ -1,4 +1,4 @@
-import os
+import shutil
 import numpy as np
 from . import model
 from . import validation as v
@@ -37,28 +37,44 @@ class Results:
             fields = {name: data[name].copy() for name in data.files}
         return fields, metadata
 
-    def run(self, project, progress=None, cancelled=None, activate=True):
+    def run(self, project, progress=None, cancelled=None):
+        """计算并保存一份结果，但不把它发布为工程的当前结果。
+
+        发布必须由任务在最终提交时与任务状态一起原子完成，否则取消请求
+        与结果激活之间会出现“任务已取消但工作台已切换”的不一致。
+        """
         computed = process(project, self.assets, progress, cancelled)
-        cancellation_pending = bool(cancelled and cancelled())
+        if cancelled and cancelled():
+            raise InterruptedError('任务已取消，本次结果未保存')
         result_id = model.uid()
         directory = self.store.directory(project['id']) / 'results' / result_id
         directory.mkdir()
-        fields = computed['fields']
-        (directory / 'fields.npz').write_bytes(float_archive(fields))
-        (directory / 'image.png').write_bytes(png_bytes(fields['image']))
-        (directory / 'thumb.jpg').write_bytes(thumbnail(fields['image']))
-        for name, field in fields.items():
-            if name in ('image', 'linear', 'before_finishing'):
-                continue
-            (directory / (name + '.png')).write_bytes(png_bytes(visualization(field, 'heat' if name not in ('valid',) else 'gray')))
-        metadata = {'id': result_id, 'project_id': project['id'], 'name': project['name'], 'source_revision': project['revision'], 'source_signature': computed['signature'], 'created_at': v.timestamp(), 'mode': project['settings']['mode'], 'frame_ids': computed['frame_ids'], 'fields': list(fields), 'width': fields['image'].shape[1], 'height': fields['image'].shape[0], 'report': computed['report'], 'statistics': image_report(fields['image'], fields['valid']), 'project': model.snapshot(project)}
-        self.store.write(directory / 'result.json', metadata)
-        metadata['activated'] = self.store.activate(project['id'], result_id, computed['signature']) if activate else False
-        if cancellation_pending:
-            raise InterruptedError('当前计算完成后取消，已保存结果保留')
+        try:
+            fields = computed['fields']
+            (directory / 'fields.npz').write_bytes(float_archive(fields))
+            (directory / 'image.png').write_bytes(png_bytes(fields['image']))
+            (directory / 'thumb.jpg').write_bytes(thumbnail(fields['image']))
+            for name, field in fields.items():
+                if name in ('image', 'linear', 'before_finishing'):
+                    continue
+                (directory / (name + '.png')).write_bytes(png_bytes(visualization(field, 'heat' if name not in ('valid',) else 'gray')))
+            metadata = {'id': result_id, 'project_id': project['id'], 'name': project['name'], 'source_revision': project['revision'], 'source_signature': computed['signature'], 'created_at': v.timestamp(), 'mode': project['settings']['mode'], 'frame_ids': computed['frame_ids'], 'fields': list(fields), 'width': fields['image'].shape[1], 'height': fields['image'].shape[0], 'report': computed['report'], 'statistics': image_report(fields['image'], fields['valid']), 'project': model.snapshot(project)}
+            self.store.write(directory / 'result.json', metadata)
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
         if progress:
-            progress(.98, '结果已保存')
+            progress(.98, '结果已写入，等待任务提交')
         return metadata
+
+    def activate(self, key, result_id, signature):
+        return self.store.activate(key, result_id, signature)
+
+    def discard(self, key, result_id):
+        """删除尚未随任务提交发布的结果目录。"""
+        v.identifier(key)
+        v.identifier(result_id)
+        shutil.rmtree(self.store.projects / key / 'results' / result_id, ignore_errors=True)
 
     def list(self, key):
         current = self.store.get(key)

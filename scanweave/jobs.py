@@ -73,9 +73,14 @@ class Jobs:
             self.save(job)
 
     def run(self, job_id, project, event):
+        result_id = None
         try:
             with self.store.lock:
                 job = self.get(job_id)
+                if job['status'] == 'cancelling':
+                    job.update(status='cancelled', error='任务已取消，未开始计算；已选结果保持不变', stage='取消', finished_at=v.timestamp())
+                    self.save(job)
+                    return
                 job.update(status='running', stage='准备数据')
                 self.save(job)
             if event.is_set():
@@ -97,17 +102,23 @@ class Jobs:
                 data, details = run_batch(project, self, job, event, callback)
                 filename = 'stacklight-' + job['kind'] + '.zip'
             else:
-                meta = self.results.run(project, callback, event.is_set, activate=job['kind'] == 'process')
-                self.append_result(job_id, meta['id'])
+                meta = self.results.run(project, callback, event.is_set)
+                result_id = meta['id']
                 details = {key: value for key, value in meta.items() if key != 'project'}
                 if job['kind'] == 'export':
                     fields, _ = self.results.fields(project['id'], meta['id'], False)
                     data, details = result_bundle(fields, meta, job['parameters'])
                     filename = 'stacklight-composite.zip'
-            if event.is_set():
-                raise InterruptedError('当前阶段结束后取消，完整历史结果保留')
+            # 取消确认与结果发布必须在同一把锁内先后判定：谁先拿到锁，
+            # 谁就定义唯一一致的结果——取消则不发布，完成则发布并可见。
             with self.store.lock:
                 job = self.get(job_id)
+                if event.is_set():
+                    if result_id:
+                        self.results.discard(project['id'], result_id)
+                    job.update(status='cancelled', error='任务已取消，本次结果未发布；已选结果保持不变', stage='取消', finished_at=v.timestamp())
+                    self.save(job)
+                    return
                 if data is not None:
                     temporary = self.store.jobs / (job_id + '.tmp')
                     temporary.write_bytes(data)
@@ -115,12 +126,21 @@ class Jobs:
                     job.update(filename=filename, bytes=len(data))
                     if job['kind'] == 'align':
                         job['mimetype'] = 'application/json'
+                if result_id:
+                    activated = job['kind'] == 'process' and self.results.activate(project['id'], result_id, details['source_signature'])
+                    if details is not None:
+                        details['activated'] = activated
+                    job['result_ids'].append(result_id)
                 job.update(status='completed', progress=100, stage='完成', details=details, finished_at=v.timestamp())
                 self.save(job)
         except Exception as error:
+            cancelled = isinstance(error, InterruptedError)
             with self.store.lock:
                 job = self.get(job_id)
-                job.update(status='cancelled' if isinstance(error, InterruptedError) else 'failed', error=str(error), stage='取消' if isinstance(error, InterruptedError) else '失败', finished_at=v.timestamp())
+                if cancelled and result_id:
+                    self.results.discard(job['project_id'], result_id)
+                    job['result_ids'] = [item for item in job['result_ids'] if item != result_id]
+                job.update(status='cancelled' if cancelled else 'failed', error=str(error), stage='取消' if cancelled else '失败', finished_at=v.timestamp())
                 self.save(job)
 
     def apply_alignment(self, job_id, revision):

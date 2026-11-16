@@ -53,7 +53,7 @@ def run_batch(project, jobs, job, event, progress):
             if event.is_set():
                 raise InterruptedError('批处理取消，已完成结果保留')
             callback = lambda fraction, message: progress((index + fraction) / len(plan), f'{index + 1}/{len(plan)} ' + message)
-            meta = jobs.results.run(item['project'], callback, event.is_set, activate=False)
+            meta = jobs.results.run(item['project'], callback, event.is_set)
             jobs.append_result(job['id'], meta['id'])
             fields, _ = jobs.results.fields(project['id'], meta['id'], False)
             data, _ = result_bundle(fields, meta, {'raw': False, 'auxiliaries': False})
