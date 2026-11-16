@@ -1,0 +1,12 @@
+name: solo12-scanweave
+services:
+  scanweave:
+    build: .
+    image: solo12-scanweave:1.0
+    ports: ["127.0.0.1:8912:8912"]
+    volumes: ["scan_data:/data"]
+    mem_limit: 2g
+    cpus: 2
+    init: true
+volumes:
+  scan_data:

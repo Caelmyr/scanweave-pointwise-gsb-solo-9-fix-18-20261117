@@ -1,0 +1,2 @@
+$('scanDemo').onclick=async()=>{try{const p=await api('/scanner/sample','POST',{});await refreshProjects();await loadProject(p.id);toast('已载入合成扫描样张，片基边框宽32像素');}catch(e){toast(e.message);}};
+$('scanManifest').onclick=async()=>{try{if(!S.project)throw Error('请先载入扫描批次');const m=await api('/scanner/'+S.project.id+'/manifest');openDialog('扫描档案',`<p>原始扫描独立保存，当前批次共 ${m.frames.length} 帧。</p><pre>${esc(JSON.stringify(m,null,2))}</pre><a href="/api/scanner/${S.project.id}/manifest.json" download>下载档案 JSON</a>`);}catch(e){toast(e.message);}};
